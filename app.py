@@ -1,178 +1,138 @@
-
 import streamlit as st
-from transformers import pipeline
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
 
-# ---------------------- 页面配置 ----------------------
-st.set_page_config(
-    page_title="机器翻译对比与评测系统",
-    page_icon="🌐",
-    layout="wide"
-)
+st.set_page_config(page_title="图像特征检测与匹配平台", layout="wide")
+st.title("📷 图像特征检测与匹配实验")
 
+# ---------------------- 1. Canny边缘检测 ----------------------
+st.header("1. Canny边缘检测（非极大值抑制对比）")
+img_canny_file = st.file_uploader("上传图片（用于Canny边缘检测）", type=["jpg","png"], key="canny_up")
 
-# ---------------------- 缓存模型加载 ----------------------
-@st.cache_resource(show_spinner="正在加载翻译模型...")
-def load_translator():
-    """加载 Hugging Face 的英译中模型"""
-    translator = pipeline(
-        "translation_en_to_zh",
-        model="Helsinki-NLP/opus-mt-en-zh",
-        device=-1  # 使用 CPU，避免无 GPU 报错
-    )
-    return translator
+if img_canny_file:
+    img_canny = cv2.imdecode(np.frombuffer(img_canny_file.read(), np.uint8), 1)
+    img_canny = cv2.cvtColor(img_canny, cv2.COLOR_BGR2RGB)
+    gray = cv2.cvtColor(img_canny, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (5,5), 0)
+    
+    # 手动实现非极大值抑制前后对比
+    edges_no_nms = cv2.Canny(gray, 50, 150, apertureSize=3, L2gradient=False)
+    edges_nms = cv2.Canny(gray, 50, 150, apertureSize=3, L2gradient=True)
+    
+    fig, axes = plt.subplots(1,3, figsize=(15,5))
+    axes[0].imshow(img_canny)
+    axes[0].set_title("原图")
+    axes[0].axis("off")
+    axes[1].imshow(edges_no_nms, cmap="gray")
+    axes[1].set_title("无NMS边缘")
+    axes[1].axis("off")
+    axes[2].imshow(edges_nms, cmap="gray")
+    axes[2].set_title("含NMS边缘")
+    axes[2].axis("off")
+    st.pyplot(fig)
 
+# ---------------------- 2. Harris/SIFT特征点检测 ----------------------
+st.header("2. Harris/SIFT特征点检测")
+img_feat_file = st.file_uploader("上传图片（用于特征点检测）", type=["jpg","png"], key="feat_up")
 
-translator = load_translator()
+if img_feat_file:
+    img_feat = cv2.imdecode(np.frombuffer(img_feat_file.read(), np.uint8), 1)
+    img_feat_rgb = cv2.cvtColor(img_feat, cv2.COLOR_BGR2RGB)
+    gray_feat = cv2.cvtColor(img_feat, cv2.COLOR_BGR2GRAY)
+    
+    # Harris角点检测
+    if st.button("检测Harris角点", key="harris_btn"):
+        dst = cv2.cornerHarris(gray_feat, 2, 3, 0.04)
+        dst = cv2.dilate(dst, None)
+        img_harris = img_feat_rgb.copy()
+        img_harris[dst > 0.01 * dst.max()] = [255,0,0]
+        fig, ax = plt.subplots(figsize=(8,6))
+        ax.imshow(img_harris)
+        ax.set_title("Harris角点（红色标记）")
+        ax.axis("off")
+        st.pyplot(fig)
+    
+    # SIFT特征点检测
+    if st.button("检测SIFT特征点", key="sift_btn"):
+        sift = cv2.SIFT_create()
+        kp = sift.detect(gray_feat, None)
+        img_sift = cv2.drawKeypoints(img_feat_rgb, kp, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+        fig, ax = plt.subplots(figsize=(8,6))
+        ax.imshow(img_sift)
+        ax.set_title("SIFT特征点（圆圈表示尺度）")
+        ax.axis("off")
+        st.pyplot(fig)
 
-# ---------------------- 基于规则的翻译词典 ----------------------
-# 基础英中词典，模拟早期机器翻译
-basic_dict = {
-    "I": "我",
-    "you": "你",
-    "he": "他",
-    "she": "她",
-    "it": "它",
-    "we": "我们",
-    "they": "他们",
-    "am": "是",
-    "is": "是",
-    "are": "是",
-    "was": "是",
-    "were": "是",
-    "have": "有",
-    "has": "有",
-    "do": "做",
-    "does": "做",
-    "did": "做",
-    "go": "去",
-    "went": "去",
-    "eat": "吃",
-    "ate": "吃",
-    "drink": "喝",
-    "drank": "喝",
-    "run": "跑",
-    "ran": "跑",
-    "walk": "走",
-    "walked": "走",
-    "like": "喜欢",
-    "likes": "喜欢",
-    "love": "爱",
-    "loves": "爱",
-    "cat": "猫",
-    "dog": "狗",
-    "rain": "下雨",
-    "cats": "猫",
-    "dogs": "狗",
-    "raining": "下雨",
-    "raining cats and dogs": "下猫下狗"  # 俚语的逐词保留
-}
+# ---------------------- 3. 图像匹配流程可视化 ----------------------
+st.header("3. 图像匹配流程（特征点检测→匹配→RANSAC）")
+img1_file = st.file_uploader("上传图像1", type=["jpg","png"], key="match_up1")
+img2_file = st.file_uploader("上传图像2", type=["jpg","png"], key="match_up2")
 
+if img1_file and img2_file:
+    img1 = cv2.imdecode(np.frombuffer(img1_file.read(), np.uint8), 1)
+    img2 = cv2.imdecode(np.frombuffer(img2_file.read(), np.uint8), 1)
+    img1_rgb = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)
+    img2_rgb = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+    
+    if st.button("执行图像匹配", key="match_btn"):
+        # 特征点+描述子
+        sift = cv2.SIFT_create()
+        kp1, des1 = sift.detectAndCompute(gray1, None)
+        kp2, des2 = sift.detectAndCompute(gray2, None)
+        
+        # 初始匹配
+        bf = cv2.BFMatcher()
+        matches = bf.knnMatch(des1, des2, k=2)
+        good = []
+        for m,n in matches:
+            if m.distance < 0.75 * n.distance:
+                good.append(m)
+        
+        # RANSAC计算单应矩阵
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
+        H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        
+        # 可视化匹配结果
+        matchesMask = mask.ravel().tolist()
+        draw_params = dict(matchColor = (0,255,0),
+                           singlePointColor = None,
+                           matchesMask = matchesMask,
+                           flags = 2)
+        img_match = cv2.drawMatches(img1_rgb, kp1, img2_rgb, kp2, good, None, **draw_params)
+        
+        fig, ax = plt.subplots(figsize=(15,8))
+        ax.imshow(img_match)
+        ax.set_title("SIFT匹配 + RANSAC优化（绿色为有效匹配）")
+        ax.axis("off")
+        st.pyplot(fig)
 
-def rule_based_translate(sentence: str) -> str:
-    """基于词典的逐词直译"""
-    words = sentence.strip().split()
-    translated = []
-    for word in words:
-        # 处理标点
-        clean_word = word.strip(".,!?").lower()
-        if clean_word in basic_dict:
-            translated.append(basic_dict[clean_word])
+# ---------------------- 4. 图像全景拼接 ----------------------
+st.header("4. 多幅图像全景拼接")
+img_pano_files = st.file_uploader("上传多张重叠图像", type=["jpg","png"], accept_multiple_files=True, key="pano_up")
+
+if img_pano_files and len(img_pano_files)>=2:
+    if st.button("生成全景图", key="pano_btn"):
+        imgs = []
+        for file in img_pano_files:
+            img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
+            imgs.append(img)
+        
+        stitcher = cv2.Stitcher_create()
+        status, pano = stitcher.stitch(imgs)
+        
+        if status == cv2.Stitcher_OK:
+            pano_rgb = cv2.cvtColor(pano, cv2.COLOR_BGR2RGB)
+            fig, ax = plt.subplots(figsize=(15,5))
+            ax.imshow(pano_rgb)
+            ax.set_title("全景拼接结果")
+            ax.axis("off")
+            st.pyplot(fig)
         else:
-            # 不在词典里的词直接保留
-            translated.append(word)
-    return " ".join(translated)
+            st.error("拼接失败：图像重叠不足或不匹配")
 
-
-# ---------------------- 页面内容 ----------------------
-st.title("🌐 机器翻译对比与评测系统")
 st.markdown("---")
-
-# 分三个模块的 Tab
-tab1, tab2, tab3 = st.tabs([
-    "模块1：神经机器翻译引擎",
-    "模块2：直译 vs. 意译对比",
-    "模块3：BLEU 自动评测"
-])
-
-# ---------------------- 模块1：神经机器翻译引擎 ----------------------
-with tab1:
-    st.header("🧠 神经机器翻译引擎 (NMT Engine)")
-    st.markdown("输入英文句子，体验基于 Transformer 的英译中效果。")
-
-    # 输入框
-    en_text = st.text_area(
-        "请输入英文句子：",
-        value="It rains cats and dogs.",
-        height=150
-    )
-
-    if st.button("开始翻译", key="btn1"):
-        with st.spinner("模型正在翻译中..."):
-            # 调用翻译模型
-            result = translator(en_text)[0]["translation_text"]
-            st.success("翻译完成！")
-            st.subheader("译文结果：")
-            st.info(result)
-
-# ---------------------- 模块2：直译 vs. 意译对比 ----------------------
-with tab2:
-    st.header("⚖️ 基于规则的直译 vs. 神经网络意译")
-    st.markdown("对比两种翻译范式的差异，观察基于规则翻译的局限性。")
-
-    # 输入框
-    en_text2 = st.text_area(
-        "请输入英文句子：",
-        value="It rains cats and dogs.",
-        height=150
-    )
-
-    if st.button("开始对比", key="btn2"):
-        with st.spinner("正在对比两种翻译结果..."):
-            # 1. 基于规则的直译
-            rule_trans = rule_based_translate(en_text2)
-            # 2. 神经机器翻译
-            nmt_trans = translator(en_text2)[0]["translation_text"]
-
-            # 并排展示
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("基于规则的直译")
-                st.warning(rule_trans)
-            with col2:
-                st.subheader("神经网络意译")
-                st.success(nmt_trans)
-
-# ---------------------- 模块3：BLEU 自动评测 ----------------------
-with tab3:
-    st.header("📊 机器翻译质量自动评测 (BLEU Score)")
-    st.markdown("输入待评测译文和参考译文，自动计算 BLEU 分数（0~1，越高越接近参考译文）。")
-
-    # 输入框
-    candidate_text = st.text_area("待评测译文（如 NMT 或直译结果）：", height=100)
-    reference_text = st.text_area("参考译文（人工翻译或标准译文）：", height=100)
-
-    if st.button("计算 BLEU 分数", key="btn3"):
-        if not candidate_text or not reference_text:
-            st.error("请输入待评测译文和参考译文！")
-        else:
-            # 分词
-            candidate = candidate_text.split()
-            reference = [reference_text.split()]  # 参考译文需要是列表的列表
-
-            # 计算 BLEU，带平滑函数避免零分
-            smoothie = SmoothingFunction().method4
-            bleu_score = sentence_bleu(reference, candidate, smoothing_function=smoothie)
-
-            st.success(f"BLEU 分数：{bleu_score:.4f}")
-            # 解释分数
-            if bleu_score >= 0.7:
-                st.info("✅ 译文质量优秀，与参考译文高度匹配")
-            elif bleu_score >= 0.4:
-                st.info("⚠️ 译文质量中等，部分内容与参考译文有差异")
-            else:
-                st.warning("❌ 译文质量较差，与参考译文差异较大")
-
-# ---------------------- 页脚 ----------------------
-st.markdown("---")
-st.markdown("© 2025 NLP 课程 Week 9 实验 | 机器翻译对比与评测系统")
+st.caption("模式识别与图像处理 - A3作业平台")
